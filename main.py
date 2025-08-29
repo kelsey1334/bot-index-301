@@ -5,7 +5,7 @@ from telegram.ext import Updater, CommandHandler, CallbackContext
 from telegram import Update
 from google.oauth2 import service_account
 from google.auth.transport.requests import AuthorizedSession
-import os, json
+import os, json, re
 from datetime import datetime
 
 # ===========================
@@ -16,9 +16,6 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# ===========================
-# Telegram Bot Token
-# ===========================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # ===========================
@@ -32,13 +29,11 @@ if os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"):
         creds_json, scopes=SCOPES
     )
 else:
-    # fallback nếu chạy local có file
     credentials = service_account.Credentials.from_service_account_file(
         "api-index.json", scopes=SCOPES
     )
 
 authed_session = AuthorizedSession(credentials)
-
 INDEXING_ENDPOINT = "https://indexing.googleapis.com/v3/urlNotifications:publish"
 
 # ===========================
@@ -52,7 +47,6 @@ def check_quota():
     global used_requests, current_day
     today = datetime.utcnow().date()
     if today != current_day:
-        # reset khi sang ngày mới
         current_day = today
         used_requests = 0
     remaining = max(0, DAILY_LIMIT - used_requests)
@@ -63,16 +57,20 @@ def add_quota(count=1):
     used_requests += count
 
 # ===========================
-# Gửi URL lên Indexing API
+# Helpers
 # ===========================
+def extract_domain(text):
+    """Chuẩn hóa domain/subdomain từ user input"""
+    text = text.strip()
+    text = re.sub(r"^https?://", "", text)     # bỏ http:// hoặc https://
+    text = re.sub(r"/.*$", "", text)           # bỏ path sau domain
+    return text
+
 def index_url(url: str):
     body = {"url": url, "type": "URL_UPDATED"}
     response = authed_session.post(INDEXING_ENDPOINT, json=body)
     return response.json()
 
-# ===========================
-# Parse sitemap
-# ===========================
 def parse_sitemap(url):
     urls = []
     r = requests.get(url)
@@ -91,20 +89,48 @@ def parse_sitemap(url):
     return urls
 
 # ===========================
-# /index_all command
+# Commands
 # ===========================
+def start(update: Update, context: CallbackContext):
+    update.message.reply_text(
+        "👋 Xin chào!\n"
+        "Mình là *Index Bot*.\n\n"
+        "📌 Hướng dẫn sử dụng:\n"
+        "1. Add email sau vào Google Search Console (GSC) với quyền *Owner* cho domain cần index:\n"
+        "`api-index@api-index-470509.iam.gserviceaccount.com`\n\n"
+        "2. Lệnh để chạy:\n"
+        "`/index_all yourdomain.com`\n"
+        "👉 Bot sẽ crawl toàn bộ sitemap và gửi URL lên Google Indexing API.\n\n"
+        "ℹ️ Bạn có thể nhập domain, subdomain, hoặc cả URL — bot sẽ tự chuẩn hoá."
+    )
+
 def index_all(update: Update, context: CallbackContext):
     if len(context.args) == 0:
-        update.message.reply_text("❌ Vui lòng nhập domain: /index_all abc.com")
+        update.message.reply_text(
+            "❓ Bạn muốn index cho domain nào?\n"
+            "Ví dụ: `/index_all abc.com` hoặc `/index_all https://blog.abc.com/post-1`"
+        )
         return
 
-    domain = context.args[0]
-    sitemap_url = f"https://{domain}/sitemap_index.xml"
+    domain = extract_domain(context.args[0])
+    sitemap_url_https = f"https://{domain}/sitemap_index.xml"
+    sitemap_url_http = f"http://{domain}/sitemap_index.xml"
+
+    update.message.reply_text(
+        f"⚠️ Domain/Subdomain: `{domain}`\n\n"
+        "Trước khi chạy, cần add email:\n"
+        "`api-index@api-index-470509.iam.gserviceaccount.com`\n"
+        "👉 vào Google Search Console với quyền *Owner*.\n"
+    )
 
     try:
-        urls = parse_sitemap(sitemap_url)
-        total = len(urls)
+        # Ưu tiên HTTPS, fallback sang HTTP
+        try:
+            urls = parse_sitemap(sitemap_url_https)
+        except Exception:
+            urls = parse_sitemap(sitemap_url_http)
 
+        total = len(urls)
         used, remaining = check_quota()
         update.message.reply_text(
             f"🔍 Tìm thấy {total} URL trong sitemap.\n"
@@ -144,7 +170,10 @@ def index_all(update: Update, context: CallbackContext):
 def main():
     updater = Updater(BOT_TOKEN)
     dp = updater.dispatcher
+
+    dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("index_all", index_all))
+
     updater.start_polling()
     updater.idle()
 
