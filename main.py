@@ -1,13 +1,22 @@
 import logging
 import requests
 import xml.etree.ElementTree as ET
-from telegram.ext import Updater, CommandHandler, CallbackContext, MessageHandler, Filters, CallbackQueryHandler
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import (
+    Updater, CommandHandler, CallbackContext,
+    MessageHandler, Filters, CallbackQueryHandler
+)
+from telegram import (
+    Update, InlineKeyboardMarkup, InlineKeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton, ParseMode
+)
 from google.oauth2 import service_account
 from google.auth.transport.requests import AuthorizedSession
 import os, json, re
 from datetime import datetime, timedelta, timezone
 
+# ===========================
+# Logging
+# ===========================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -15,7 +24,11 @@ logging.basicConfig(
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+# ===========================
+# Google API Credentials
+# ===========================
 SCOPES = ["https://www.googleapis.com/auth/indexing"]
+
 if os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"):
     creds_json = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
     credentials = service_account.Credentials.from_service_account_info(
@@ -53,11 +66,11 @@ def quota_message():
     used, remaining = check_quota()
     reset_time_vn = (datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
                      + timedelta(days=1)).replace(tzinfo=timezone.utc).astimezone(timezone(timedelta(hours=7)))
-    msg = (f"📊 Hôm nay đã dùng {used}/{DAILY_LIMIT} request.\n"
+    msg = (f"📊 Đã dùng {used}/{DAILY_LIMIT} request hôm nay.\n"
            f"👉 Còn lại {remaining} lượt.\n"
-           f"🔄 Quota reset lúc {reset_time_vn.strftime('%H:%M, %d-%m-%Y')} (giờ VN).")
+           f"🔄 Reset lúc {reset_time_vn.strftime('%H:%M, %d-%m-%Y')} (giờ VN).")
     if remaining <= 20:
-        msg += "\n⚠️ Quota sắp hết, ưu tiên URL quan trọng!"
+        msg += "\n⚠️ Quota sắp hết, hãy ưu tiên URL quan trọng."
     return msg
 
 # ===========================
@@ -90,40 +103,48 @@ def parse_sitemap(url):
             urls.append(loc)
     return urls
 
+def chunk_list(lst, n):
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
 # ===========================
 # Commands & Handlers
 # ===========================
 def start(update: Update, context: CallbackContext):
     keyboard = [
-        [InlineKeyboardButton("🚀 Bắt đầu Index", callback_data="ask_domain")],
-        [InlineKeyboardButton("📊 Kiểm tra quota", callback_data="check_quota")]
+        [KeyboardButton("🚀 Bắt đầu Index")],
+        [KeyboardButton("📊 Kiểm tra quota")],
+        [KeyboardButton("❌ Hủy")]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     update.message.reply_text(
         "👋 Xin chào!\nMình là *Index Bot*.\n\n"
-        "Bạn có thể ép Google index sitemap của domain.\n"
-        "👉 Hãy chọn một chức năng bên dưới:",
-        reply_markup=reply_markup
+        "Bạn có thể chọn chức năng từ menu bên dưới:",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
     )
 
-def button_handler(update: Update, context: CallbackContext):
-    query = update.callback_query
-    query.answer()
+def handle_menu(update: Update, context: CallbackContext):
+    text = update.message.text
 
-    if query.data == "ask_domain":
-        query.edit_message_text("✍️ Vui lòng nhập domain hoặc URL (ví dụ: `abc.com` hoặc `https://blog.abc.com/post`).")
+    if text == "📊 Kiểm tra quota":
+        update.message.reply_text(quota_message())
+
+    elif text == "🚀 Bắt đầu Index":
+        update.message.reply_text("✍️ Nhập domain hoặc URL (ví dụ: `abc.com` hoặc `https://blog.abc.com/post`).",
+                                  parse_mode=ParseMode.MARKDOWN)
         context.user_data["awaiting_domain"] = True
 
-    elif query.data == "check_quota":
-        query.edit_message_text(quota_message())
+    elif text == "❌ Hủy":
+        context.user_data["awaiting_domain"] = False
+        update.message.reply_text("❌ Đã hủy thao tác.")
 
-def handle_text(update: Update, context: CallbackContext):
-    if context.user_data.get("awaiting_domain"):
-        domain = extract_domain(update.message.text)
+    elif context.user_data.get("awaiting_domain"):
+        domain = extract_domain(text)
         context.user_data["awaiting_domain"] = False
 
         keyboard = [
-            [InlineKeyboardButton(f"✅ Bắt đầu index {domain}", callback_data=f"index::{domain}")],
+            [InlineKeyboardButton(f"✅ Index {domain}", callback_data=f"index::{domain}")],
             [InlineKeyboardButton("❌ Hủy", callback_data="cancel")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -132,9 +153,10 @@ def handle_text(update: Update, context: CallbackContext):
             f"⚠️ Domain/Subdomain: `{domain}`\n\n"
             "Trước khi chạy, cần add email:\n"
             "`api-index@api-index-470509.iam.gserviceaccount.com`\n"
-            "👉 vào GSC với quyền *Owner*.\n\n"
+            "👉 vào Google Search Console với quyền *Owner*.\n\n"
             "Bạn có muốn bắt đầu index ngay không?",
-            reply_markup=reply_markup
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
         )
 
 def run_index(domain, query):
@@ -147,26 +169,31 @@ def run_index(domain, query):
             urls = parse_sitemap(sitemap_url_http)
 
         total = len(urls)
-        query.edit_message_text(
-            f"🔍 Tìm thấy {total} URL trong sitemap.\n" + quota_message()
-        )
+        query.edit_message_text(f"🔍 Tìm thấy {total} URL trong sitemap.\n" + quota_message())
 
         success, fail = 0, 0
-        for url in urls:
+        for batch in chunk_list(urls, 10):
             used, remaining = check_quota()
             if remaining <= 0:
-                query.message.reply_text("🚫 Hết quota hôm nay!")
+                query.message.reply_text("🚫 Hết quota Google Indexing API hôm nay!")
                 break
 
-            result = index_url(url)
-            add_quota(1)
+            batch_results = []
+            for url in batch:
+                result = index_url(url)
+                add_quota(1)
+                if "error" in result:
+                    fail += 1
+                    batch_results.append(f"❌ `{url}`")
+                else:
+                    success += 1
+                    batch_results.append(f"✅ `{url}`")
 
-            if "error" in result:
-                fail += 1
-                query.message.reply_text(f"❌ {url}\nLỗi: {result['error']['message']}")
-            else:
-                success += 1
-                query.message.reply_text(f"✅ {url}")
+            query.message.reply_text(
+                "\n".join(batch_results),
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True
+            )
 
         query.message.reply_text(
             f"🎯 Hoàn tất. Thành công: {success}, Thất bại: {fail}\n" + quota_message()
@@ -192,9 +219,8 @@ def main():
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CallbackQueryHandler(button_handler, pattern="^(ask_domain|check_quota)$"))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_menu))
     dp.add_handler(CallbackQueryHandler(button_confirm, pattern="^(index::.*|cancel)$"))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
 
     updater.start_polling()
     updater.idle()
