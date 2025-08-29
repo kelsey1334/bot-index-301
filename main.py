@@ -161,6 +161,7 @@ def handle_menu(update: Update, context: CallbackContext):
 
         total = len(urls)
         context.user_data["urls"] = urls
+        context.user_data["domain"] = domain
 
         # Kiểm tra quota trên tất cả API
         candidates = []
@@ -179,17 +180,29 @@ def handle_menu(update: Update, context: CallbackContext):
             )
             return
 
-        # Hiển thị button chọn API
-        buttons = [[InlineKeyboardButton(f"{api['name']} ({api['email']})", callback_data=f"index::{api['name']}")] for api in candidates]
-        reply_markup = InlineKeyboardMarkup(buttons)
+        # Thông tin tổng quan
+        msg = ["📊 Quota các API khả dụng:\n"]
+        for api in APIs:
+            remaining = check_api_quota(api)
+            status = "✅" if api in candidates else "❌"
+            msg.append(f"{status} {api['name']} ({api['email']}) còn {remaining}/{DAILY_LIMIT}")
+        update.message.reply_text("\n".join(msg))
 
-        update.message.reply_text(
-            f"🔍 Tìm thấy {total} URL trong sitemap của `{domain}`.\n\n"
-            "👉 Hãy chọn API để chạy index. "
-            "Nhớ add email của API đó vào GSC với quyền *Owner* trước:",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
+        # Gửi riêng cho từng API đủ quota
+        for api in candidates:
+            keyboard = [
+                [InlineKeyboardButton("✅ Bắt đầu index", callback_data=f"index::{api['name']}")],
+                [InlineKeyboardButton("❌ Huỷ", callback_data="cancel")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            update.message.reply_text(
+                f"👉 Để index domain `{domain}`, cần add email này vào GSC với quyền *Owner*:\n\n"
+                f"`{api['email']}`\n\n"
+                f"Sau khi add xong, chọn thao tác:",
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN
+            )
 
 def run_index(api, urls, query):
     total = len(urls)
